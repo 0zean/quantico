@@ -1,63 +1,76 @@
 import os
-import time
+from pathlib import Path
 
-import pymem  # type: ignore
-import pymem.process  # type: ignore
+import pymem.exception
+import pymem.process
 import streamlit as st
+import win32process
 from pymem.ressources.structure import MODULEINFO
 
-from functions.esp import ESPController
-from functions.rcs import rcs
-from functions.trig import trig
-from utils.config import config, TRIGGER_KEYS
+from utils.config import TRIGGER_KEYS
 from utils.memory import ProcessMemory
-from utils.structs import ScreenSize
 from utils.thread_manager import ThreadManager
 
 st.set_page_config(
     page_title="CORAL.py",
-    page_icon="🐠",
+    page_icon="\U0001f420",
     layout="centered",
     initial_sidebar_state="collapsed",
 )
 state = st.session_state
+_HERE = Path(__file__).resolve().parent
+STILL_ACTIVE = 259  # GetExitCodeProcess result for a process that has not exited
+
+try:  # utils.offsets parses output/*.json at import and raises RuntimeError if the dump is missing or stale
+    from functions.esp import ESPController
+    from functions.rcs import rcs
+    from functions.trig import trig
+except RuntimeError as e:
+    st.error(str(e), icon="\U0001f6a8")
+    st.stop()
 
 if st.sidebar.button("Shut Down"):
-    if "thread_mgr" in state:
-        state.thread_mgr.stop_all()
-    time.sleep(1)
-    os._exit(0)
+    os._exit(0)  # daemon workers and the raylib window go down with the process
 
-# process attachment
-if "loaded" not in state:
-    try:
-        mem = ProcessMemory("cs2.exe")
-    except pymem.pymem.exception.ProcessNotFound:
-        st.error("cs2.exe not found!", icon="🚨")
-        st.stop()
 
+def _still_attached(res: tuple[ProcessMemory, int, ThreadManager]) -> bool:
+    mem, _, mgr = res
+    if win32process.GetExitCodeProcess(mem.pymem.process_handle) == STILL_ACTIVE:
+        return True
+    mgr.stop_all()  # cs2.exe exited: stop the old workers before re-attaching
+    mem.pymem.close_process()
+    return False
+
+
+@st.cache_resource(validate=_still_attached)  # one attach per server process, shared by every tab and refresh
+def _attach() -> tuple[ProcessMemory, int, ThreadManager]:
+    mem = ProcessMemory("cs2.exe")  # ProcessNotFound propagates and is not cached
     module = pymem.process.module_from_name(mem.pymem.process_handle, "client.dll")
     if not isinstance(module, MODULEINFO):
-        st.error("client.dll not found in cs2.exe!", icon="🚨")
-        st.stop()
+        mem.pymem.close_process()
+        raise LookupError("client.dll not found in cs2.exe!")
+    return mem, module.lpBaseOfDll, ThreadManager()
 
-    state.mem = mem
-    state.client = module.lpBaseOfDll
-    state.thread_mgr = ThreadManager()
 
-    msg = st.toast("cs2.exe found! loading...", icon="🎉")
-    time.sleep(1)
-    msg.toast("coral.py loaded", icon="💯")
+try:
+    mem, client, thread_mgr = _attach()
+except pymem.exception.ProcessNotFound:
+    st.error("cs2.exe not found!", icon="\U0001f6a8")
+    st.stop()
+except pymem.exception.CouldNotOpenProcess:
+    st.error("Could not open cs2.exe for reading (try running CORAL as administrator).", icon="\U0001f6a8")
+    st.stop()
+except LookupError as e:
+    st.error(str(e), icon="\U0001f6a8")
+    st.stop()
+
+if "loaded" not in state:
+    st.toast("coral.py loaded", icon="\U0001f4af")
+    st.balloons()
     state.loaded = True
 
-
-mem: ProcessMemory = state.mem
-client: int = state.client
-thread_mgr: ThreadManager = state.thread_mgr
-
-
 # App design + layout
-with open("assets/style.css") as f:
+with open(_HERE / "assets" / "style.css", encoding="utf-8") as f:
     st.html(f"<style>{f.read()}</style>")
 
 st.html(
@@ -68,7 +81,6 @@ st.html(
     '<span style="color:#4dbedf;">l</span>🐠'
     "</h1>"
 )
-st.balloons()
 
 tab_aim, tab_esp, tab_misc = st.tabs(["Aim", "ESP", "Misc"])
 
@@ -83,6 +95,8 @@ with tab_aim:
 
         if enable_trigger and not thread_mgr.is_running("tbot"):
             thread_mgr.start_thread("tbot", trig, (mem, client))
+        elif not enable_trigger and thread_mgr.is_running("tbot"):
+            thread_mgr.stop_thread("tbot")
 
         # RCS
         enable_rcs = st.toggle("Enable RCS")
@@ -90,6 +104,8 @@ with tab_aim:
 
         if enable_rcs and not thread_mgr.is_running("rcs"):
             thread_mgr.start_thread("rcs", rcs, (mem, client))
+        elif not enable_rcs and thread_mgr.is_running("rcs"):
+            thread_mgr.stop_thread("rcs")
 
     with col_control:
         trigkey = st.selectbox(
@@ -116,16 +132,14 @@ with tab_esp:
     thread_mgr.config.enable_esp = enable_esp
 
     if enable_esp and not thread_mgr.is_running("esp"):
-        screen = ScreenSize(width=config.screen.width, height=config.screen.height)
 
         def _esp_thread(
             stop_event,
             cfg,
             _mem: ProcessMemory = mem,
             _client: int = client,
-            _screen: ScreenSize = screen,
         ) -> None:
-            controller = ESPController(_mem, _client, _screen)
+            controller = ESPController(_mem, _client)
             controller.run(stop_event, cfg)
 
         thread_mgr.start_thread("esp", _esp_thread, ())

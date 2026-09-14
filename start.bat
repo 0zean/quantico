@@ -1,5 +1,7 @@
 @echo off
 setlocal
+REM Run from this script's folder regardless of how it was launched
+cd /d "%~dp0"
 
 REM Define the path to the executable
 set EXE_PATH=cs2-dumper.exe
@@ -41,8 +43,7 @@ if %ERRORLEVEL% equ 0 (
 :::   \/_____/   \/_____/   \/_/ /_/   \/_/\/_/   \/_____/ 
 for /f "delims=: tokens=*" %%A in ('findstr /b ::: "%~f0"') do @echo %%A                                                 
 
-REM Navigate to the directory and activate virtual environment
-cd "..\coral"
+REM Activate the virtual environment
 call .\.venv\Scripts\activate
 
 REM Copy the Local URL to the clipboard

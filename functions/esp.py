@@ -1,17 +1,18 @@
+# ruff: noqa: E402
+import contextlib
 import ctypes
 import io
 import logging
 import os
 import struct
-import sys
 import threading
-import time
+
+import win32api
 
 logger = logging.getLogger(__name__)
 
-_stdout, _stderr = sys.stdout, sys.stderr
-sys.stdout = sys.stderr = io.StringIO()
-try:
+# raylibpy prints a loading banner to stdout on first import; stderr is left alone so warnings survive
+with contextlib.redirect_stdout(io.StringIO()):
     from raylibpy import (
         FLAG_WINDOW_TOPMOST,
         FLAG_WINDOW_TRANSPARENT,
@@ -27,6 +28,7 @@ try:
         set_config_flags,
         set_target_fps,
         set_trace_log_level,
+        unload_font,
         window_should_close,
     )
 
@@ -36,14 +38,20 @@ try:
         _HAS_PASSTHROUGH = True
     except ImportError:
         _HAS_PASSTHROUGH = False
-finally:
-    sys.stdout, sys.stderr = _stdout, _stderr
 
-from utils.config import config
+from utils.config import (
+    BONE_INDICES,
+    ENTITY_COLOR,
+    GWL_EXSTYLE,
+    OVERLAY_FPS,
+    TRANSPARENT,
+    WS_EX_TOOLWINDOW,
+    WS_EX_TRANSPARENT,
+)
 from utils.entity import EntityManager
 from utils.memory import ProcessMemory
 from utils.offsets import offsets
-from utils.renderer import ESPRenderer
+from utils.renderer import draw_entity
 from utils.structs import ScreenSize
 from utils.thread_manager import ThreadConfig
 
@@ -51,11 +59,16 @@ from utils.thread_manager import ThreadConfig
 class ESPController:
     __slots__ = ("_mem", "_client", "_screen", "_entity_mgr")
 
-    def __init__(self, mem: ProcessMemory, client: int, screen: ScreenSize) -> None:
+    def __init__(self, mem: ProcessMemory, client: int) -> None:
         self._mem = mem
         self._client = client
-        self._screen = screen
-        self._entity_mgr = EntityManager(mem, client, offsets, config.skeleton.bone_indices)
+        # Re-query live screen metrics so overlay stays correct if the user
+        # changed resolution or moved to a different display.
+        self._screen = ScreenSize(
+            width=win32api.GetSystemMetrics(0),
+            height=win32api.GetSystemMetrics(1),
+        )
+        self._entity_mgr = EntityManager(mem, client, offsets, BONE_INDICES)
 
     def _get_view_matrix(self) -> tuple[float, ...] | None:
         raw = self._mem.read_bytes(self._client + offsets["dwViewMatrix"], 64)
@@ -71,24 +84,8 @@ class ESPController:
             logger.warning("get_window_handle() returned NULL; click-through not applied")
             return
         user32 = ctypes.windll.user32
-        style = user32.GetWindowLongW(hwnd, config.win32.gwl_exstyle)
-        user32.SetWindowLongW(
-            hwnd, config.win32.gwl_exstyle, style | config.win32.ws_ex_transparent | config.win32.ws_ex_toolwindow
-        )
-
-    def _reader(self, stop_event: threading.Event, thread_cfg: ThreadConfig, vm_cell: list, ent_cell: list) -> None:
-        """Background memory-reader thread (~60 Hz)."""
-        while not stop_event.is_set():
-            if thread_cfg.enable_esp:
-                try:
-                    vm_cell[0] = self._get_view_matrix()
-                    ent_cell[0] = self._entity_mgr.get_entities()
-                except Exception:
-                    logger.debug("ESP reader error", exc_info=True)
-            else:
-                vm_cell[0] = None
-                ent_cell[0] = []
-            time.sleep(config.timing.reader_tick)
+        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW)
 
     def run(self, stop_event: threading.Event, thread_cfg: ThreadConfig) -> None:
         set_trace_log_level(LOG_NONE)
@@ -96,22 +93,22 @@ class ESPController:
         # window flags before creation
         flags = FLAG_WINDOW_UNDECORATED | FLAG_WINDOW_TRANSPARENT | FLAG_WINDOW_TOPMOST
         if _HAS_PASSTHROUGH:
-            flags |= FLAG_WINDOW_MOUSE_PASSTHROUGH  # type: ignore
+            flags |= FLAG_WINDOW_MOUSE_PASSTHROUGH
         set_config_flags(flags)
 
         # create window
         init_window(self._screen.width, self._screen.height, b"ESP Overlay")
-        set_target_fps(144)
+        set_target_fps(OVERLAY_FPS)
 
         # obtain HWND
         hwnd = get_window_handle()
 
         # Apply Win32 styles before the sentinel frame
-        self._apply_win32_styles(hwnd)  # type: ignore
+        self._apply_win32_styles(hwnd)
 
         # sentinel frame
         begin_drawing()
-        clear_background(config.render.transparent)
+        clear_background(TRANSPARENT)
         end_drawing()
 
         # load font
@@ -119,31 +116,24 @@ class ESPController:
         font_path = os.path.join(windir, "Fonts", "calibri.ttf").encode()
         font = load_font_ex(font_path, 20, None, 0)
 
-        # Shared state reference cells + start reader
-        vm_cell: list = [None]
-        ent_cell: list = [[]]
-
-        reader_thread = threading.Thread(
-            target=self._reader, args=(stop_event, thread_cfg, vm_cell, ent_cell), daemon=True
-        )
-        reader_thread.start()
-
-        # Construct renderer once
-        renderer = ESPRenderer(self._screen, font)
-
         # render loop
+        logged: set[type[Exception]] = set()
         while not window_should_close() and not stop_event.is_set():
-            vm = vm_cell[0]
-            entities = ent_cell[0]
-
             begin_drawing()
-            clear_background(config.render.transparent)
+            clear_background(TRANSPARENT)
 
-            if thread_cfg.enable_esp and vm is not None:
-                renderer.update_matrix(vm)
-                for entity in entities:
-                    renderer.draw_entity(entity, config.render.entity_color)
+            if thread_cfg.enable_esp:
+                try:
+                    vm = self._get_view_matrix()
+                    if vm is not None:
+                        for entity in self._entity_mgr.get_entities():
+                            draw_entity(entity, vm, self._screen, font, ENTITY_COLOR)
+                except Exception as exc:
+                    if type(exc) not in logged:  # one traceback per exception type, not one per frame
+                        logged.add(type(exc))
+                        logger.warning("ESP render error", exc_info=True)
 
             end_drawing()
 
+        unload_font(font)
         close_window()

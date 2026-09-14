@@ -4,95 +4,65 @@ import time
 
 from win32gui import GetForegroundWindow, GetWindowText
 
-from utils.config import config, CS2_WINDOW_TITLE
+from utils.config import CS2_WINDOW_TITLE, SLEEP_INACTIVE, SLEEP_TICK
 from utils.memory import ProcessMemory
-from utils.mouse import get_mouse_pos, move_mouse_to_location
+from utils.mouse import RelativeMouse
 from utils.offsets import offsets
-from utils.player import PlayerPawn
-from utils.structs import Vec2
+from utils.player import read_rcs_state
 from utils.thread_manager import ThreadConfig
 
 logger = logging.getLogger(__name__)
 
+SOURCE_M_YAW = 0.022  # Source default m_yaw / m_pitch: degrees of view rotation per mouse count
 
-def rcs(
-    stop_event: threading.Event, thread_cfg: ThreadConfig, mem: ProcessMemory, client: int, smoothing: float = 1.0
-) -> None:
+
+def rcs(stop_event: threading.Event, thread_cfg: ThreadConfig, mem: ProcessMemory, client: int) -> None:
     """
     Recoil control system function.
 
     Args:
         stop_event (threading.Event): Event to signal stopping.
-        config (ThreadConfig): Shared configuration.
-        mem (ProcessMemory): Pymem instance.
+        thread_cfg (ThreadConfig): Shared configuration.
+        mem (ProcessMemory): Process memory reader.
         client (int): Client module base address.
-        smoothing (float, optional): Smoothing factor. Defaults to 1.0.
     """
-    smooth_factor = max(config.mouse.smoothing_min, min(smoothing, config.mouse.smoothing_max))
-    old_punch = Vec2(0.0, 0.0)
-    pawn: PlayerPawn | None = None
+    old_punch = (0.0, 0.0)
+    mouse = RelativeMouse()  # owns the sub-pixel carry for this worker thread
 
     while not stop_event.is_set():
         try:
             if not thread_cfg.enable_rcs:
-                pawn = None
-                old_punch = Vec2(0.0, 0.0)
-                time.sleep(config.timing.sleep_inactive)
+                old_punch = (0.0, 0.0)
+                time.sleep(SLEEP_INACTIVE)
                 continue
 
             amt = thread_cfg.rcs_amount
 
             if GetWindowText(GetForegroundWindow()) != CS2_WINDOW_TITLE:
-                time.sleep(config.timing.sleep_tick)
+                time.sleep(SLEEP_INACTIVE)
                 continue
 
             player_addr = mem.read_ptr(client + offsets["dwLocalPlayerPawn"])
 
             if not player_addr:
-                pawn = None
-                time.sleep(config.timing.sleep_tick)
+                old_punch = (0.0, 0.0)
+                time.sleep(SLEEP_INACTIVE)  # menus / between rounds: no need to poll at 200 Hz
                 continue
 
-            if pawn is None or pawn._address != player_addr:
-                pawn = PlayerPawn(mem, player_addr, client, offsets)
-
-            state = pawn.snapshot()
-            if state is None:
-                time.sleep(config.timing.sleep_tick)
-                continue
-
-            shots_fired = state.shots_fired
-            punch_x, punch_y, _ = state.aim_punch
-            sensitivity = state.sensitivity
-            amt = thread_cfg.rcs_amount
+            shots_fired, (punch_x, punch_y, _), sensitivity = read_rcs_state(mem, player_addr, client, offsets)
 
             if 1 < shots_fired < 999_999:
-                delta_x = (punch_x - old_punch.x) * -1.0
-                delta_y = (punch_y - old_punch.y) * -1.0
+                delta_x = (punch_x - old_punch[0]) * -1.0
+                delta_y = (punch_y - old_punch[1]) * -1.0
 
-                raw_move = Vec2(
-                    x=(delta_y * amt / sensitivity) / -0.022,
-                    y=(delta_x * amt / sensitivity) / 0.022,
+                # Relative move sent straight through: no cursor read-back, sub-pixel carry retained.
+                mouse.move(
+                    (delta_y * amt / sensitivity) / -SOURCE_M_YAW,
+                    (delta_x * amt / sensitivity) / SOURCE_M_YAW,
                 )
-
-                current = get_mouse_pos()
-                target = Vec2(current.x + raw_move.x, current.y + raw_move.y)
-                smoothed = Vec2(
-                    x=current.x + (target.x - current.x) / smooth_factor,
-                    y=current.y + (target.y - current.y) / smooth_factor,
-                )
-
-                move_mouse_to_location(smoothed)
-                old_punch = Vec2(punch_x, punch_y)
-            else:
-                old_punch = Vec2(0.0, 0.0)
-
-            old_punch = Vec2(punch_x, punch_y)
-
-        except KeyboardInterrupt:
-            break
+            old_punch = (punch_x, punch_y)
+            time.sleep(SLEEP_TICK)
 
         except Exception as exc:
             logger.warning("RCS error: %s", exc)
-            time.sleep(config.timing.sleep_tick)
-            continue
+            time.sleep(SLEEP_TICK)

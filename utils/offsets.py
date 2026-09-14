@@ -1,54 +1,53 @@
 import json
+from pathlib import Path
+
+_OUTPUT = Path(__file__).resolve().parent.parent / "output"
 
 
-class Client:
-    def __init__(self) -> None:
+def _load_json(name: str) -> dict:
+    path = _OUTPUT / name
+    try:
+        with path.open(encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError as e:
+        raise RuntimeError(f"Offset file not found: {path} (run start.bat to dump offsets)") from e
+    except Exception as e:
+        raise RuntimeError(f"Failed to load {path}: {e}") from e
+
+
+def _build_offsets() -> dict[str, int]:
+    offsets_json = _load_json("offsets.json")
+    client_dll = _load_json("client_dll.json")
+
+    def offset(key: str) -> int:
         try:
-            with open("output/offsets.json") as f:
-                self.offsets = json.load(f)
-            with open("output/client_dll.json") as f:
-                self.clientdll = json.load(f)
-        except FileNotFoundError as e:
-            raise RuntimeError(f"Offset file not found: {e.filename}") from e
-        except Exception as e:
-            raise RuntimeError(f"Failed to load offsets or client DLL: {e}") from e
+            return offsets_json["client.dll"][key]
+        except KeyError as e:
+            raise RuntimeError(f"Offset '{key}' not found in offsets.json") from e
 
-    def offset(self, key: str) -> int:
+    def field(class_name: str, field_name: str) -> int:
         try:
-            return self.offsets["client.dll"][key]
-        except KeyError:
-            raise KeyError(f"Offset '{key}' not found in offsets.json")
-        except Exception as e:
-            raise RuntimeError(f"Error retrieving offset '{key}': {e}")
+            return client_dll["client.dll"]["classes"][class_name]["fields"][field_name]
+        except KeyError as e:
+            raise RuntimeError(f"Field '{field_name}' not found in class '{class_name}' in client_dll.json") from e
 
-    def get(self, class_name: str, field_name: str) -> int:
-        try:
-            return self.clientdll["client.dll"]["classes"][class_name]["fields"][field_name]
-        except KeyError:
-            raise KeyError(f"Field '{field_name}' not found in class '{class_name}' in client_dll.json")
-        except Exception as e:
-            raise RuntimeError(f"Error retrieving field '{field_name}' from class '{class_name}': {e}")
+    return {
+        "dwEntityList": offset("dwEntityList"),
+        "dwLocalPlayerPawn": offset("dwLocalPlayerPawn"),
+        "dwSensitivity": offset("dwSensitivity"),
+        "dwSensitivity_sensitivity": offset("dwSensitivity_sensitivity"),
+        "m_iIDEntIndex": field("C_CSPlayerPawn", "m_iIDEntIndex"),
+        "m_iTeamNum": field("C_BaseEntity", "m_iTeamNum"),
+        "m_iHealth": field("C_BaseEntity", "m_iHealth"),
+        "m_iShotsFired": field("C_CSPlayerPawn", "m_iShotsFired"),
+        "m_pAimPunchServices": field("C_CSPlayerPawn", "m_pAimPunchServices"),
+        "dwViewMatrix": offset("dwViewMatrix"),
+        "m_lifeState": field("C_BaseEntity", "m_lifeState"),
+        "m_pGameSceneNode": field("C_BaseEntity", "m_pGameSceneNode"),
+        "m_modelState": field("CSkeletonInstance", "m_modelState"),
+        "m_hPlayerPawn": field("CCSPlayerController", "m_hPlayerPawn"),
+        "m_iszPlayerName": field("CBasePlayerController", "m_iszPlayerName"),
+    }
 
 
-nv = Client()
-
-offsets: dict[str, int] = {
-    "dwEntityList": nv.offset("dwEntityList"),
-    "dwLocalPlayerPawn": nv.offset("dwLocalPlayerPawn"),
-    "dwSensitivity": nv.offset("dwSensitivity"),
-    "dwSensitivity_sensitivity": nv.offset("dwSensitivity_sensitivity"),
-    "dwViewAngles": nv.offset("dwViewAngles"),
-    "m_iIDEntIndex": nv.get("C_CSPlayerPawn", "m_iIDEntIndex"),
-    "m_iTeamNum": nv.get("C_BaseEntity", "m_iTeamNum"),
-    "m_iHealth": nv.get("C_BaseEntity", "m_iHealth"),
-    "m_iShotsFired": nv.get("C_CSPlayerPawn", "m_iShotsFired"),
-    "m_angEyeAngles": nv.get("C_CSPlayerPawn", "m_angEyeAngles"),
-    "m_pAimPunchServices": nv.get("C_CSPlayerPawn", "m_pAimPunchServices"),
-    "m_vOldOrigin": nv.get("C_BasePlayerPawn", "m_vOldOrigin"),
-    "dwViewMatrix": nv.offset("dwViewMatrix"),
-    "m_lifeState": nv.get("C_BaseEntity", "m_lifeState"),
-    "m_pGameSceneNode": nv.get("C_BaseEntity", "m_pGameSceneNode"),
-    "m_modelState": nv.get("CSkeletonInstance", "m_modelState"),
-    "m_hPlayerPawn": nv.get("CCSPlayerController", "m_hPlayerPawn"),
-    "m_iszPlayerName": nv.get("CBasePlayerController", "m_iszPlayerName"),
-}
+offsets: dict[str, int] = _build_offsets()

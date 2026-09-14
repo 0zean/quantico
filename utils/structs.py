@@ -1,12 +1,9 @@
-from ctypes import POINTER, Structure, Union, c_float, c_long, c_uint64, c_ulong
+from ctypes import Structure, Union, c_float, c_long, c_uint64, c_ulong, c_void_p
 from dataclasses import dataclass
 
 
 class Vec3(Structure):
     _fields_ = [("x", c_float), ("y", c_float), ("z", c_float)]
-
-    def as_tuple(self) -> tuple[float, float, float]:
-        return (self.x, self.y, self.z)
 
 
 class Vec2(Structure):
@@ -24,7 +21,7 @@ class MOUSEINPUT(Structure):
         ("mouseData", c_ulong),
         ("dwFlags", c_ulong),
         ("time", c_ulong),
-        ("dwExtraInfo", POINTER(c_ulong)),
+        ("dwExtraInfo", c_void_p),  # ULONG_PTR: pointer-sized integer, not a pointer
     ]
 
 
@@ -37,22 +34,8 @@ class INPUT(Structure):
 
 
 @dataclass(slots=True)
-class PlayerState:
-    """Snapshot of local player state"""
-
-    team: int
-    health: int
-    life_state: int
-    shots_fired: int
-    view_angle: tuple[float, float]
-    aim_punch: tuple[float, float, float]
-    origin: tuple[float, float, float]
-    sensitivity: float
-
-
-@dataclass(slots=True)
 class EntitySnapshot:
-    """Game-state snapshot for a sinlge entity"""
+    """Game-state snapshot for a single entity"""
 
     address: int
     team: int

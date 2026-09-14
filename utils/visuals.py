@@ -1,13 +1,13 @@
 from utils.structs import ScreenSize, Vec3
 
 
-def world_to_screen(matrix: tuple[float, ...], pos: Vec3, screen: ScreenSize) -> list[float] | None:
+def world_to_screen(matrix: tuple[float, ...], pos: Vec3 | None, screen: ScreenSize) -> list[float] | None:
     """
     World to screen function.
 
     Args:
         matrix (tuple[float, ...]): View matrix.
-        pos (Vec3): x, y, z position.
+        pos (Vec3 | None): x, y, z position.
         screen (ScreenSize): screen height and width.
 
     Returns:

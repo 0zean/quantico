@@ -5,23 +5,20 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11.11"
 dependencies = [
-    "glfw>=2.10.0",
     "keyboard>=0.13.5",
     "pymem>=1.14.0",
-    "pynput>=1.8.1",
-    "pyopengl>=3.1.10",
-    "pywin32>=311",
+    "pynput>=1.8.2",
+    "pywin32>=312",
     "raylib-py>=5.5.0",
-    "streamlit>=1.57.0",
+    "streamlit>=1.63.0",
 ]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.15.12"
+    "ruff>=0.16.7"
 ]
 
 [tool.ruff]
 exclude = [".venv"]
 respect-gitignore = true
 line-length = 120
-lint.ignore = ["F403"]
